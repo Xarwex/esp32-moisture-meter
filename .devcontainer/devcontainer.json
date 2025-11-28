@@ -1,0 +1,6 @@
+{
+  "name": "ESP 32 Rust",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+}
