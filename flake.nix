@@ -23,34 +23,28 @@
         pkgs = import nixpkgs {
           inherit system;
         };
+        espToolchain = esp32.packages.${system}.default;
+        rustcWithSysroot = pkgs.writeShellScriptBin "rustc" ''
+          exec "${espToolchain}/bin/rustc" --sysroot "${espToolchain}" "$@"
+        '';
       in
       {
         devShells.default = pkgs.mkShell {
-          LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
-          RUSTUP_TOOLCHAIN = "${esp32.packages.${system}.default}";
-          RUST_SRC_PATH = "${esp32.packages.${system}.default}/lib/rustlib/src/rust/library";
+          # LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
+          RUSTUP_TOOLCHAIN = "${espToolchain}";
+          RUST_SRC_PATH = "${espToolchain}/lib/rustlib/src/rust/library";
+          RUSTC = "${rustcWithSysroot}/bin/rustc";
+          # LD_LIBRARY_PATH = "${pkgs.lib.makeLibraryPath [
+          #   pkgs.zlib
+          #   pkgs.stdenv.cc.cc.lib
+          # ]}";
 
           inputsFrom = [
             esp32.devShells.${system}.default
           ];
 
-          buildInputs = [
-            pkgs.rustup
-          ];
-
-          shellHook = ''
-            export PATH="${pkgs.rust-analyzer}/bin:${esp32.packages.${system}.default}/bin:$PATH"
-            export LD_LIBRARY_PATH="${pkgs.lib.makeLibraryPath [ pkgs.zlib ]}:$LD_LIBRARY_PATH"
-            export LD_LIBRARY_PATH="${pkgs.stdenv.cc.cc.lib.outPath}/lib:$LD_LIBRARY_PATH"
-          '';
-
           packages = [
-            pkgs.rustup
             pkgs.rust-analyzer
-            # pkgs.clang
-            #pkgs.rust-analyzer
-            #esp-generate
-            #cargo-feature
           ];
         };
       }
