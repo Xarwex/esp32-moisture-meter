@@ -39,6 +39,7 @@
           ];
 
           shellHook = ''
+            export PATH="${pkgs.rust-analyzer}/bin:${esp32.packages.${system}.default}/bin:$PATH"
             export LD_LIBRARY_PATH="${pkgs.lib.makeLibraryPath [ pkgs.zlib ]}:$LD_LIBRARY_PATH"
             export LD_LIBRARY_PATH="${pkgs.stdenv.cc.cc.lib.outPath}/lib:$LD_LIBRARY_PATH"
           '';
