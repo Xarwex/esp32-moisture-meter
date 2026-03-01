@@ -5,6 +5,13 @@ authors = ["Aleksander Kleinszmidt <60325364+Xarwex@users.noreply.github.com>"]
 edition = "2024"
 license = "MIT OR Apache-2.0"
 
+[[bin]]
+name = "moisture-meter"
+path = "src/main.rs"
+test = false
+doctest = false
+bench = false
+
 [dependencies]
 esp-hal = { version = "1.0.0", features = ["esp32", "unstable"] }
 esp-backtrace = { version = "0.18.1", features = [
@@ -12,7 +19,9 @@ esp-backtrace = { version = "0.18.1", features = [
   "panic-handler",
   "println",
 ] }
+esp-bootloader-esp-idf = { version = "0.4.0", features = ["esp32"] }
 esp-println = { version = "0.16.1", features = ["esp32"] }
+nb = "1.1.0"
 
 # [features]
 # default = ["esp-hal/xtal-40mhz"]

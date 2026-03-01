@@ -4,33 +4,32 @@
 use esp_backtrace as _;
 use esp_hal::{
     analog::adc::{Adc, AdcConfig, Attenuation},
-    clock::ClockControl,
     delay::Delay,
-    gpio::Io,
-    peripherals::Peripherals,
-    prelude::*,
-    system::SystemControl,
 };
 use esp_println::println;
 
-#[entry]
-fn main() -> ! {
-    let peripherals = Peripherals::take();
-    let system = SystemControl::new(peripherals.SYSTEM);
-    let clocks = ClockControl::boot_defaults(system.clock_control).freeze();
+esp_bootloader_esp_idf::esp_app_desc!();
 
-    let io = Io::new(peripherals.GPIO, peripherals.IO_MUX);
+#[esp_hal::main]
+fn main() -> ! {
+    let peripherals = esp_hal::init(esp_hal::Config::default());
 
     let mut adc_config = AdcConfig::new();
-
-    let mut pin = adc_config.enable_pin(io.pins.gpio15, Attenuation::Attenuation0dB);
-
+    let mut pin = adc_config.enable_pin(peripherals.GPIO15, Attenuation::_11dB);
     let mut adc = Adc::new(peripherals.ADC2, adc_config);
 
-    let delay = Delay::new(&clocks);
+    let delay = Delay::new();
     loop {
         let pin15_value = nb::block!(adc.read_oneshot(&mut pin)).unwrap();
-        println!("PIN read {pin15_value}");
-        delay.delay_millis(1000u32);
+        let moisture_percent = moisture_percent_from_adc(pin15_value);
+        println!("PIN15 read {pin15_value} ({moisture_percent}%)");
+        delay.delay_millis(1000);
     }
+}
+
+pub const ESP32_ADC_MAX: u16 = 4095;
+
+pub fn moisture_percent_from_adc(raw_adc: u16) -> u8 {
+    let clamped = raw_adc.min(ESP32_ADC_MAX) as u32;
+    ((clamped * 100) / ESP32_ADC_MAX as u32) as u8
 }

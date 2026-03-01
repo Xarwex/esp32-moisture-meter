@@ -3,50 +3,47 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    flake-utils.url = "github:numtide/flake-utils";
+    flake-parts.url = "github:hercules-ci/flake-parts";
     esp32 = {
-      url = "github:leighleighleigh/esp-rs-nix/6be9cd080962efa09cac2bbf807efdedafa62269";
+      url = "github:leighleighleigh/esp-rs-nix";
       inputs.nixpkgs.follows = "nixpkgs";
+      inputs.flake-parts.follows = "flake-parts";
     };
   };
 
   outputs =
-    {
-      nixpkgs,
-      flake-utils,
-      esp32,
-      ...
-    }:
-    flake-utils.lib.eachDefaultSystem (
-      system:
-      let
-        pkgs = import nixpkgs {
-          inherit system;
-        };
-        espToolchain = esp32.packages.${system}.default;
-        rustcWithSysroot = pkgs.writeShellScriptBin "rustc" ''
-          exec "${espToolchain}/bin/rustc" --sysroot "${espToolchain}" "$@"
-        '';
-      in
-      {
-        devShells.default = pkgs.mkShell {
-          # LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
-          RUSTUP_TOOLCHAIN = "${espToolchain}";
-          RUST_SRC_PATH = "${espToolchain}/lib/rustlib/src/rust/library";
-          RUSTC = "${rustcWithSysroot}/bin/rustc";
-          # LD_LIBRARY_PATH = "${pkgs.lib.makeLibraryPath [
-          #   pkgs.zlib
-          #   pkgs.stdenv.cc.cc.lib
-          # ]}";
+    inputs@{ flake-parts, ... }:
+    flake-parts.lib.mkFlake { inherit inputs; } {
+      systems = [
+        "x86_64-linux"
+        "aarch64-linux"
+        "aarch64-darwin"
+      ];
 
-          inputsFrom = [
-            esp32.devShells.${system}.default
-          ];
+      perSystem =
+        {
+          pkgs,
+          system,
+          ...
+        }:
+        {
+          devShells.default = pkgs.mkShell {
+            packages = [
+              # For copilot
+              pkgs.bashInteractive
 
-          packages = [
-            pkgs.rust-analyzer
-          ];
+              inputs.esp32.packages.${system}.default
+              pkgs.rust-analyzer
+              pkgs.rustup
+              pkgs.espflash
+              pkgs.pkg-config
+              pkgs.stdenv.cc
+            ];
+
+            shellHook = ''
+              export RUSTUP_TOOLCHAIN=${inputs.esp32.packages.${system}.default}
+            '';
+          };
         };
-      }
-    );
+    };
 }
