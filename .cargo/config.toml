@@ -8,4 +8,4 @@ target = "xtensa-esp32-none-elf"
 runner = "espflash flash --monitor"
 
 [unstable]
-build-std = ["core"]
+build-std = ["core", "alloc"]

@@ -1,0 +1,130 @@
+# Home Assistant package for ESP32 moisture webhook ingest + alerts.
+# Replace ESP32_MOISTURE_WEBHOOK_ID and notify.notify with your own values.
+# ESP32_MOISTURE_WEBHOOK_ID must match the trailing id in HOME_ASSISTANT_WEBHOOK_URL.
+
+input_number:
+  moisture_meter_percent:
+    name: Moisture meter percent
+    min: 0
+    max: 100
+    step: 1
+    mode: box
+  moisture_meter_raw_adc:
+    name: Moisture meter raw adc
+    min: 0
+    max: 4095
+    step: 1
+    mode: box
+
+input_datetime:
+  moisture_meter_last_webhook:
+    name: Moisture meter last webhook
+    has_date: true
+    has_time: true
+  moisture_meter_last_alert:
+    name: Moisture meter last alert
+    has_date: true
+    has_time: true
+
+input_boolean:
+  moisture_meter_low_alert_active:
+    name: Moisture meter low alert active
+
+template:
+  - sensor:
+      - name: Soil Moisture
+        unique_id: soil_moisture_percent
+        unit_of_measurement: "%"
+        state_class: measurement
+        icon: mdi:water-percent
+        state: "{{ states('input_number.moisture_meter_percent') | float(0) }}"
+        availability: >
+          {% set last = states('input_datetime.moisture_meter_last_webhook') %}
+          {% if last in ['unknown', 'unavailable', ''] %}
+            false
+          {% else %}
+            {{ (as_timestamp(now()) - as_timestamp(last)) < 10800 }}
+          {% endif %}
+        attributes:
+          raw_adc: "{{ states('input_number.moisture_meter_raw_adc') | int(0) }}"
+          last_webhook: "{{ states('input_datetime.moisture_meter_last_webhook') }}"
+
+automation:
+  - id: moisture_meter_webhook_ingest
+    alias: Moisture meter webhook ingest
+    mode: single
+    trigger:
+      - platform: webhook
+        webhook_id: ESP32_MOISTURE_WEBHOOK_ID
+        allowed_methods:
+          - POST
+        local_only: true
+    action:
+      - variables:
+          moisture_percent: "{{ trigger.json.moisture_percent | int(0) }}"
+          raw_adc: "{{ trigger.json.raw_adc | int(0) }}"
+      - service: input_number.set_value
+        target:
+          entity_id: input_number.moisture_meter_percent
+        data:
+          value: "{{ [0, [moisture_percent, 100] | min] | max }}"
+      - service: input_number.set_value
+        target:
+          entity_id: input_number.moisture_meter_raw_adc
+        data:
+          value: "{{ [0, [raw_adc, 4095] | min] | max }}"
+      - service: input_datetime.set_datetime
+        target:
+          entity_id: input_datetime.moisture_meter_last_webhook
+        data:
+          datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
+
+  - id: moisture_meter_low_alert
+    alias: Moisture meter low alert
+    mode: single
+    trigger:
+      - platform: numeric_state
+        entity_id: sensor.soil_moisture
+        below: 30
+    condition:
+      - condition: state
+        entity_id: input_boolean.moisture_meter_low_alert_active
+        state: "off"
+      - condition: template
+        value_template: >
+          {% set last = states('input_datetime.moisture_meter_last_alert') %}
+          {% if last in ['unknown', 'unavailable', ''] %}
+            true
+          {% else %}
+            {{ (as_timestamp(now()) - as_timestamp(last)) > 21600 }}
+          {% endif %}
+    action:
+      - service: notify.notify
+        data:
+          title: Moisture meter alert
+          message: >-
+            Soil moisture is low ({{ states('sensor.soil_moisture') }}%).
+      - service: input_boolean.turn_on
+        target:
+          entity_id: input_boolean.moisture_meter_low_alert_active
+      - service: input_datetime.set_datetime
+        target:
+          entity_id: input_datetime.moisture_meter_last_alert
+        data:
+          datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
+
+  - id: moisture_meter_low_alert_clear
+    alias: Moisture meter low alert clear
+    mode: single
+    trigger:
+      - platform: numeric_state
+        entity_id: sensor.soil_moisture
+        above: 40
+    condition:
+      - condition: state
+        entity_id: input_boolean.moisture_meter_low_alert_active
+        state: "on"
+    action:
+      - service: input_boolean.turn_off
+        target:
+          entity_id: input_boolean.moisture_meter_low_alert_active
