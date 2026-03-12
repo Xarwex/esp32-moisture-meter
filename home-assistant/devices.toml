@@ -1,0 +1,13 @@
+[defaults]
+# Add a new device by adding a new slug to this list.
+# Allowed slug characters: a-z, 0-9, underscore.
+device_names = ["device01"]
+
+# Generated values:
+#   device_id  = device_id_prefix + slug (with "_" converted to "-")
+#   webhook_id = webhook_id_prefix + slug uppercased
+device_id_prefix = "esp32-moisture-"
+webhook_id_prefix = "ESP32_MOISTURE_WEBHOOK_"
+
+# Home Assistant notify service used by all generated low-moisture alerts.
+notify_service = "notify.notify"

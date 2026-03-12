@@ -1,98 +1,105 @@
-# Home Assistant package for ESP32 moisture webhook ingest + alerts.
-# Replace ESP32_MOISTURE_WEBHOOK_ID and notify.notify with your own values.
-# ESP32_MOISTURE_WEBHOOK_ID must match the trailing id in HOME_ASSISTANT_WEBHOOK_URL.
+# GENERATED FILE - DO NOT EDIT BY HAND.
+# Source of truth: home-assistant/devices.toml
+# Regenerate with: python home-assistant/generate_package.py
 
 input_number:
-  moisture_meter_percent:
-    name: Moisture meter percent
+  moisture_meter_device01_percent:
+    name: Moisture meter device01 percent
     min: 0
     max: 100
     step: 1
     mode: box
-  moisture_meter_raw_adc:
-    name: Moisture meter raw adc
-    min: 0
-    max: 4095
-    step: 1
-    mode: box
+
+input_text:
+  moisture_meter_device01_device_id:
+    name: Moisture meter device01 id
+    initial: esp32-moisture-device01
+    max: 64
 
 input_datetime:
-  moisture_meter_last_webhook:
-    name: Moisture meter last webhook
+  moisture_meter_device01_last_webhook:
+    name: Moisture meter device01 last webhook
     has_date: true
     has_time: true
-  moisture_meter_last_alert:
-    name: Moisture meter last alert
+  moisture_meter_device01_last_alert:
+    name: Moisture meter device01 last alert
     has_date: true
     has_time: true
 
 input_boolean:
-  moisture_meter_low_alert_active:
-    name: Moisture meter low alert active
+  moisture_meter_device01_low_alert_active:
+    name: Moisture meter device01 low alert active
 
 template:
   - sensor:
-      - name: Soil Moisture
-        unique_id: soil_moisture_percent
+      - name: Soil Moisture device01
+        unique_id: soil_moisture_device01_percent
         unit_of_measurement: "%"
         state_class: measurement
         icon: mdi:water-percent
-        state: "{{ states('input_number.moisture_meter_percent') | float(0) }}"
+        state: "{{ states('input_number.moisture_meter_device01_percent') | float(0) }}"
         availability: >
-          {% set last = states('input_datetime.moisture_meter_last_webhook') %}
+          {% set last = states('input_datetime.moisture_meter_device01_last_webhook') %}
           {% if last in ['unknown', 'unavailable', ''] %}
             false
           {% else %}
             {{ (as_timestamp(now()) - as_timestamp(last)) < 10800 }}
           {% endif %}
         attributes:
-          raw_adc: "{{ states('input_number.moisture_meter_raw_adc') | int(0) }}"
-          last_webhook: "{{ states('input_datetime.moisture_meter_last_webhook') }}"
+          device_id: "{{ states('input_text.moisture_meter_device01_device_id') }}"
+          last_webhook: "{{ states('input_datetime.moisture_meter_device01_last_webhook') }}"
 
 automation:
-  - id: moisture_meter_webhook_ingest
-    alias: Moisture meter webhook ingest
+  - id: moisture_meter_device01_webhook_ingest
+    alias: Moisture meter device01 webhook ingest
     mode: single
     trigger:
       - platform: webhook
-        webhook_id: ESP32_MOISTURE_WEBHOOK_ID
+        webhook_id: ESP32_MOISTURE_WEBHOOK_DEVICE01
         allowed_methods:
           - POST
         local_only: true
+    condition:
+      - condition: template
+        value_template: >
+          {{ trigger.json is mapping and (
+             trigger.json.device_id == 'esp32-moisture-device01' or
+             trigger.json.device_id == 'ESP32_MOISTURE_WEBHOOK_DEVICE01'
+          ) }}
     action:
       - variables:
           moisture_percent: "{{ trigger.json.moisture_percent | int(0) }}"
-          raw_adc: "{{ trigger.json.raw_adc | int(0) }}"
+          device_id: "{{ trigger.json.device_id }}"
       - service: input_number.set_value
         target:
-          entity_id: input_number.moisture_meter_percent
+          entity_id: input_number.moisture_meter_device01_percent
         data:
           value: "{{ [0, [moisture_percent, 100] | min] | max }}"
-      - service: input_number.set_value
+      - service: input_text.set_value
         target:
-          entity_id: input_number.moisture_meter_raw_adc
+          entity_id: input_text.moisture_meter_device01_device_id
         data:
-          value: "{{ [0, [raw_adc, 4095] | min] | max }}"
+          value: "{{ device_id }}"
       - service: input_datetime.set_datetime
         target:
-          entity_id: input_datetime.moisture_meter_last_webhook
+          entity_id: input_datetime.moisture_meter_device01_last_webhook
         data:
           datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
 
-  - id: moisture_meter_low_alert
-    alias: Moisture meter low alert
+  - id: moisture_meter_device01_low_alert
+    alias: Moisture meter device01 low alert
     mode: single
     trigger:
       - platform: numeric_state
-        entity_id: sensor.soil_moisture
+        entity_id: sensor.soil_moisture_device01
         below: 30
     condition:
       - condition: state
-        entity_id: input_boolean.moisture_meter_low_alert_active
+        entity_id: input_boolean.moisture_meter_device01_low_alert_active
         state: "off"
       - condition: template
         value_template: >
-          {% set last = states('input_datetime.moisture_meter_last_alert') %}
+          {% set last = states('input_datetime.moisture_meter_device01_last_alert') %}
           {% if last in ['unknown', 'unavailable', ''] %}
             true
           {% else %}
@@ -101,30 +108,30 @@ automation:
     action:
       - service: notify.notify
         data:
-          title: Moisture meter alert
+          title: Moisture meter device01 alert
           message: >-
-            Soil moisture is low ({{ states('sensor.soil_moisture') }}%).
+            device01 soil moisture is low ({{ states('sensor.soil_moisture_device01') }}%).
       - service: input_boolean.turn_on
         target:
-          entity_id: input_boolean.moisture_meter_low_alert_active
+          entity_id: input_boolean.moisture_meter_device01_low_alert_active
       - service: input_datetime.set_datetime
         target:
-          entity_id: input_datetime.moisture_meter_last_alert
+          entity_id: input_datetime.moisture_meter_device01_last_alert
         data:
           datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
 
-  - id: moisture_meter_low_alert_clear
-    alias: Moisture meter low alert clear
+  - id: moisture_meter_device01_low_alert_clear
+    alias: Moisture meter device01 low alert clear
     mode: single
     trigger:
       - platform: numeric_state
-        entity_id: sensor.soil_moisture
+        entity_id: sensor.soil_moisture_device01
         above: 40
     condition:
       - condition: state
-        entity_id: input_boolean.moisture_meter_low_alert_active
+        entity_id: input_boolean.moisture_meter_device01_low_alert_active
         state: "on"
     action:
       - service: input_boolean.turn_off
         target:
-          entity_id: input_boolean.moisture_meter_low_alert_active
+          entity_id: input_boolean.moisture_meter_device01_low_alert_active
