@@ -82,15 +82,18 @@ async fn main(spawner: Spawner) -> ! {
     esp_alloc::heap_allocator!(#[ram(reclaimed)] size: 64 * 1024);
     esp_alloc::heap_allocator!(size: 36 * 1024);
 
-    // Prepare ADC channel on GPIO15 for moisture probe reads.
-    let mut adc_config = AdcConfig::new();
-    let mut pin = adc_config.enable_pin(peripherals.GPIO15, Attenuation::_11dB);
-    let mut adc = Adc::new(peripherals.ADC2, adc_config);
+    let moisture_percent = {
+        // Prepare ADC channel on GPIO15 for moisture probe reads.
+        let mut adc_config = AdcConfig::new();
+        let mut pin = adc_config.enable_pin(peripherals.GPIO15, Attenuation::_11dB);
+        let mut adc = Adc::new(peripherals.ADC2, adc_config);
 
-    // Take one sample per wake cycle.
-    let raw_adc = nb::block!(adc.read_oneshot(&mut pin)).unwrap();
-    let moisture_percent = moisture_percent_from_adc(raw_adc);
-    println!("Device PIN15 read {raw_adc} ({moisture_percent}%)");
+        // Take one sample per wake cycle.
+        let raw_adc = nb::block!(adc.read_oneshot(&mut pin)).unwrap();
+        let moisture_percent = moisture_percent_from_adc(raw_adc);
+        println!("Device PIN15 read {raw_adc} ({moisture_percent}%)");
+        moisture_percent
+    };
 
     // Start preemptive scheduler used by esp-radio/Wi-Fi internals.
     let timg0 = TimerGroup::new(peripherals.TIMG0);
@@ -173,6 +176,7 @@ async fn main(spawner: Spawner) -> ! {
         // Construct HTTP client each attempt.
         let mut client = HttpClient::new(&tcp_client, &dns_client);
         // Start POST request to Home Assistant webhook URL.
+        println!("{}", WEBHOOK_URL);
         match client.request(Method::POST, WEBHOOK_URL).await {
             Ok(builder) => {
                 // Receive buffer for HTTP response headers/body.
@@ -193,15 +197,15 @@ async fn main(spawner: Spawner) -> ! {
                 .await
                 {
                     Ok(Ok(_)) => {
-                        println!("Webhook publish succeeded on attempt {attempt}");
+                        println!("Succeeded on attempt {attempt}");
                         sent = true;
                         break;
                     }
                     Ok(Err(err)) => {
-                        println!("Webhook publish failed on attempt {attempt}: {err:?}");
+                        println!("Failed on attempt {attempt}: {err:?}");
                     }
                     Err(_) => {
-                        println!("Webhook publish timed out on attempt {attempt}");
+                        println!("Timed out on attempt {attempt}");
                     }
                 }
             }
