@@ -6,7 +6,7 @@ use core::fmt::Write;
 use constcat::concat;
 use embassy_executor::Spawner;
 use embassy_net::{
-    Runner, StackResources,
+    DhcpConfig, Runner, Stack, StackResources,
     dns::DnsSocket,
     tcp::client::{TcpClient, TcpClientState},
 };
@@ -17,15 +17,18 @@ use esp_alloc as _;
 use esp_backtrace as _;
 
 use esp_hal::{
-    analog::adc::{Adc, AdcConfig, Attenuation},
+    Blocking,
+    analog::adc::{Adc, AdcConfig, AdcPin, Attenuation},
     clock::CpuClock,
+    peripherals::{ADC1, ADC2, GPIO15, GPIO34},
     ram,
     rng::Rng,
     rtc_cntl::{Rtc, sleep::TimerWakeupSource, wakeup_cause},
     timer::timg::TimerGroup,
 };
-use esp_println::println;
-use esp_radio::wifi::{ClientConfig, Config, ModeConfig, WifiDevice};
+use esp_println::{dbg, println};
+use esp_radio::wifi::{ClientConfig, Config, ModeConfig, ScanConfig, WifiController, WifiDevice};
+use heapless::String;
 // Lightweight HTTP client for embedded targets.
 use reqwless::{
     client::HttpClient,
@@ -45,19 +48,20 @@ macro_rules! mk_static {
         x
     }};
 }
-
 // Deep-sleep interval (1 hour) for low battery drain.
-const WAKE_INTERVAL_SECS: u64 = 60 * 60;
-// Calibrated ADC maximum after sensor wiring (80% of 12-bit full scale).
-const ADC_MAX: u16 = 3276;
+const WAKE_INTERVAL_SECS: u64 = 10;
+// This is maximum ADC that is achieved when the sensor is connected.
+const ADC_MAX: u16 = 3300;
 // Maximum wait time to get DHCP lease after Wi-Fi link is up.
 const DHCP_TIMEOUT_SECS: u64 = 30;
 // Maximum wait time to connect station to AP.
 const WIFI_CONNECT_TIMEOUT_SECS: u64 = 30;
 // Maximum wait time for one HTTP webhook request.
-const REQUEST_TIMEOUT_SECS: u64 = 10;
+const REQUEST_TIMEOUT_SECS: u64 = 60;
 // Retry count per wake cycle to avoid infinite battery drain.
 const MAX_PUBLISH_RETRIES: u8 = 3;
+
+const BUFFER_SIZE: usize = 4096;
 
 const WIFI_SSID: &str = env!("WIFI_SSID");
 const WIFI_PASSWORD: &str = env!("WIFI_PASSWORD");
@@ -68,186 +72,140 @@ const WEBHOOK_URL: &str = concat!(WEBHOOK_URL_BASE, "/moisture_sensor_", DEVICE_
 // Main async task entrypoint provided by esp-rtos + embassy integration.
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
-    // Build-time config values (set via env vars before flashing).
+    println!("This device will post to {WEBHOOK_URL}");
 
     // Initialize chip peripherals and choose max CPU clock for Wi-Fi reliability.
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
 
-    // Log wake cause for deep-sleep wakes; EN reset is a hard reset and will show Undefined.
-    println!("Wake source: {:?}", wakeup_cause());
-
-    // Create global heap regions used by async networking + Wi-Fi internals.
-    // Reclaimed RAM is memory made available after boot steps complete.
-    esp_alloc::heap_allocator!(#[ram(reclaimed)] size: 64 * 1024);
-    esp_alloc::heap_allocator!(size: 36 * 1024);
-
-    let moisture_percent = {
-        // Prepare ADC channel on GPIO15 for moisture probe reads.
-        let mut adc_config = AdcConfig::new();
-        let mut pin = adc_config.enable_pin(peripherals.GPIO15, Attenuation::_11dB);
-        let mut adc = Adc::new(peripherals.ADC2, adc_config);
-
-        // Take one sample per wake cycle.
-        let raw_adc = nb::block!(adc.read_oneshot(&mut pin)).unwrap();
-        let moisture_percent = moisture_percent_from_adc(raw_adc);
-        println!("Device PIN15 read {raw_adc} ({moisture_percent}%)");
-        moisture_percent
-    };
-
-    // Start preemptive scheduler used by esp-radio/Wi-Fi internals.
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     esp_rtos::start(timg0.timer0);
 
-    // Initialize radio subsystem once scheduler is running.
-    let radio = mk_static!(esp_radio::Controller<'static>, esp_radio::init().unwrap());
+    // // Create global heap regions used by async networking + Wi-Fi internals.
+    // // Reclaimed RAM is memory made available after boot steps complete.
+    // //esp_alloc::heap_allocator!(#[ram(reclaimed)] size: 64 * 1024);
+    esp_alloc::heap_allocator!(#[unsafe(link_section = ".dram2_uninit")] size: 98767);
 
-    // Build Wi-Fi controller + station interface.
-    let (mut controller, interfaces) =
-        esp_radio::wifi::new(radio, peripherals.WIFI, Config::default()).unwrap();
-    let wifi_interface = interfaces.sta;
-
-    // Build deterministic random seed for network stack internal IDs/ports.
     let rng = Rng::new();
-    let seed = (rng.random() as u64) << 32 | rng.random() as u64;
-    // Build embassy TCP/IP stack over the Wi-Fi station network device.
+    let radio_init = &*mk_static!(
+        esp_radio::Controller<'static>,
+        esp_radio::init().expect("Failed to initialize Wi-Fi/BLE controller")
+    );
+
+    println!("Initializing wifi controller");
+    let (mut wifi_controller, interfaces) =
+        esp_radio::wifi::new(&radio_init, peripherals.WIFI, Default::default())
+            .expect("Failed to initialize Wi-Fi controller");
+
+    let net_seed = rng.random() as u64 | ((rng.random() as u64) << 32);
+
+    let dhcp_config = DhcpConfig::default();
+    let config = embassy_net::Config::dhcpv4(dhcp_config);
+
+    // Init network stack
     let (stack, runner) = embassy_net::new(
-        wifi_interface,
-        embassy_net::Config::dhcpv4(Default::default()),
+        interfaces.sta,
+        config,
         mk_static!(StackResources<3>, StackResources::<3>::new()),
-        seed,
+        net_seed,
     );
 
-    // Spawn network runner task (must stay alive while networking is active).
-    spawner.spawn(net_task(runner)).ok();
+    println!("Spawning net task");
+    spawner.spawn(net_task(runner)).unwrap();
 
-    // Configure Wi-Fi as station client with your SSID/password.
-    controller
-        .set_config(&ModeConfig::Client(
-            ClientConfig::default()
-                .with_ssid(WIFI_SSID.into())
-                .with_password(WIFI_PASSWORD.into()),
-        ))
-        .unwrap();
-    // Start the Wi-Fi driver state machine.
-    controller.start_async().await.unwrap();
+    let mut adc_config = AdcConfig::new();
+    let mut pin = adc_config.enable_pin(peripherals.GPIO34, Attenuation::_11dB);
+    let mut adc = Adc::new(peripherals.ADC1, adc_config);
 
-    // Connect to access point, but abort this wake cycle on timeout.
-    if with_timeout(
-        Duration::from_secs(WIFI_CONNECT_TIMEOUT_SECS),
-        controller.connect_async(),
-    )
-    .await
-    .is_err()
-    {
-        println!("Wi-Fi connect timed out; skipping webhook publish");
-        sleep_for_interval(peripherals.LPWR);
-    }
+    // println!("Spawning moisture reporter");
+    // spawner
+    //     .spawn(moisture_reporting(wifi_controller, stack, pin, adc))
+    //     .unwrap();
 
-    // Wait for DHCP IPv4 configuration, again with a strict timeout.
-    if with_timeout(
-        Duration::from_secs(DHCP_TIMEOUT_SECS),
-        stack.wait_config_up(),
-    )
-    .await
-    .is_err()
-    {
-        println!("DHCP timed out; skipping webhook publish");
-        sleep_for_interval(peripherals.LPWR);
-    }
-
-    // Build a small TCP client and DNS resolver bound to the network stack.
-    let tcp_client = TcpClient::new(
-        stack,
-        mk_static!(
-            TcpClientState<1, 1024, 1024>,
-            TcpClientState::<1, 1024, 1024>::new()
-        ),
-    );
-    let dns_client = DnsSocket::new(stack);
-
-    // Build compact JSON payload without dynamic heap allocation.
-    let mut payload: heapless::String<160> = heapless::String::new();
-    write!(&mut payload, "{{\"value\":{moisture_percent}}}").ok();
-
-    // Try sending webhook with bounded retries.
-    let mut sent = false;
-    for attempt in 1..=MAX_PUBLISH_RETRIES {
-        // Construct HTTP client each attempt.
-        let mut client = HttpClient::new(&tcp_client, &dns_client);
-        // Start POST request to Home Assistant webhook URL.
-        println!("{}", WEBHOOK_URL);
-        match client.request(Method::POST, WEBHOOK_URL).await {
-            Ok(builder) => {
-                // Receive buffer for HTTP response headers/body.
-                let mut rx_buf = [0u8; 1024];
-                // Explicit headers keep protocol behavior predictable.
-                let headers = [
-                    ("Connection", "close"),
-                    ("Content-Type", "application/json"),
-                ];
-                // Attach headers + payload body.
-                let mut request = builder.headers(&headers).body(payload.as_bytes());
-
-                // Bound each HTTP attempt so we always return to sleep.
-                match with_timeout(
-                    Duration::from_secs(REQUEST_TIMEOUT_SECS),
-                    request.send(&mut rx_buf),
-                )
-                .await
-                {
-                    Ok(Ok(_)) => {
-                        println!("Succeeded on attempt {attempt}");
-                        sent = true;
-                        break;
-                    }
-                    Ok(Err(err)) => {
-                        println!("Failed on attempt {attempt}: {err:?}");
-                    }
-                    Err(_) => {
-                        println!("Timed out on attempt {attempt}");
-                    }
-                }
+    let mut body: String<64> = String::new();
+    loop {
+        if esp_radio::wifi::sta_state() != esp_radio::wifi::WifiStaState::Connected {
+            println!("We're not connected to WiFi - will try to connect to {WIFI_SSID}");
+            if !wifi_controller.is_started().unwrap_or(false) {
+                println!("Controller not initialized - starting");
+                let client_config = ModeConfig::Client(
+                    ClientConfig::default()
+                        .with_ssid(WIFI_SSID.into())
+                        .with_password(WIFI_PASSWORD.into()),
+                );
+                wifi_controller.set_config(&client_config).unwrap();
+                println!("Starting WiFi...");
+                wifi_controller.start_async().await.unwrap();
+                println!("WiFi started!");
             }
-            Err(err) => {
-                println!("Failed to build webhook request on attempt {attempt}: {err:?}");
+
+            println!("Connecting to {WIFI_SSID}...");
+            if let Err(e) = wifi_controller.connect_async().await {
+                println!(
+                    "Couldn't connect to {WIFI_SSID}, because {e}, retrying in {WAKE_INTERVAL_SECS}s"
+                );
+                Timer::after_secs(WAKE_INTERVAL_SECS).await;
+                continue;
             }
+            println!("Connected to {WIFI_SSID}")
         }
 
-        // Small retry gap to avoid hammering AP/HA.
-        Timer::after(Duration::from_secs(2)).await;
-    }
+        let dns = DnsSocket::new(stack);
+        let tcp_state = TcpClientState::<1, BUFFER_SIZE, BUFFER_SIZE>::new();
+        let tcp = TcpClient::new(stack, &tcp_state);
 
-    // Log final outcome for serial debugging.
-    if !sent {
-        println!("Failed to publish after {MAX_PUBLISH_RETRIES} attempts");
-    }
+        let mut client = HttpClient::new(&tcp, &dns);
+        let mut buffer = [0; BUFFER_SIZE];
 
-    // Return to deep sleep after this single-sample publish cycle.
-    // Pressing the onboard EN button performs a full reset, which also triggers another publish cycle.
-    sleep_for_interval(peripherals.LPWR);
+        let moisture_percent = {
+            let raw_adc = nb::block!(adc.read_oneshot(&mut pin)).unwrap();
+            moisture_percent_from_adc(raw_adc)
+        };
+        body.clear();
+        write!(body, "{{\"value\": {moisture_percent}}}").unwrap();
+
+        match client.request(Method::POST, WEBHOOK_URL).await {
+            Ok(http_req) => {
+                println!("About to send payload '{body}'");
+                let mut http_req = http_req
+                    .body(body.as_bytes())
+                    .headers(&[("Content-Type", "application/json")]);
+                let response = http_req.send(&mut buffer).await.unwrap();
+
+                println!("Got response {:?}", response.status);
+            }
+            Err(e) => println!("Got error {e:?} when trying to construct the http request"),
+        }
+
+        // let mut http_req = client
+        //     .request(Method::POST, WEBHOOK_URL)
+        //     .await
+        //     .unwrap()
+        //     .body(body.as_bytes());
+        Timer::after_secs(WAKE_INTERVAL_SECS).await;
+    }
 }
 
-// Put device into deep sleep with timer wake.
-// Manual publishes are triggered by pressing EN, which resets the chip and restarts `main`.
-fn sleep_for_interval(lpwr: esp_hal::peripherals::LPWR) -> ! {
-    // RTC controller owns deep-sleep entry.
-    let mut rtc = Rtc::new(lpwr);
-    // Periodic wake source for hourly telemetry.
-    let timer = TimerWakeupSource::new(core::time::Duration::from_secs(WAKE_INTERVAL_SECS));
-    // Enter deep sleep; chip resets on wake and restarts from `main`.
-    println!("Entering deep sleep for {WAKE_INTERVAL_SECS}s (or press EN to reset now)");
-    rtc.sleep_deep(&[&timer]);
-}
-
-// Embassy background task that continuously services the network stack.
 #[embassy_executor::task]
 async fn net_task(mut runner: Runner<'static, WifiDevice<'static>>) {
     runner.run().await;
 }
 
+// #[embassy_executor::task]
+// async fn moisture_reporting(
+//     mut controller: WifiController<'static>,
+//     stack: Stack<'static>,
+//     mut pin: AdcPin<GPIO34<'static>, ADC1<'static>>,
+//     mut adc: Adc<'static, ADC1<'static>, Blocking>,
+// ) {
+// }
+//
+// 2269 is dry -> set 2500 as baseline dry
+// 1232 is wet -> set 1000 as max wet
+// Given any reading - clamp it between these two values first, then the actual percentage of
+// wetness is 100 - ((clamp(x) - 1000) * 100 / 1500)
 // Convert raw ADC sample to integer percentage.
 pub fn moisture_percent_from_adc(raw_adc: u16) -> u8 {
-    let clamped = raw_adc.min(ADC_MAX) as u32;
-    ((clamped * 100) / ADC_MAX as u32) as u8
+    let reversed_raw_adc = (ADC_MAX as u32).saturating_sub(raw_adc as u32) * 100;
+    (reversed_raw_adc / ADC_MAX as u32) as u8
 }
