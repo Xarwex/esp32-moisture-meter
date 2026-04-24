@@ -48,7 +48,9 @@ macro_rules! mk_static {
 const WAKE_INTERVAL_SECS: u64 = 60 * 60 * 3; // 3 hours
 // Once we're connected we don't really disconnect, so we can spam a bit. This will only go wrong if
 // the WiFI goes out.
-const WIFI_RETRY_SECS: u64 = 10;
+const WIFI_RETRY_SECONDS: u64 = 10;
+const WIFI_CONNECT_RETRY_ATTEMPTS: u8 = 10;
+const POST_RETRY_ATTEMPTS: u8 = 3;
 // Calibration points from measured readings on the previous scale:
 // 10% was fully wet and 60% was fully dry.
 const WET_ADC: u16 = 2970;
@@ -132,15 +134,33 @@ async fn main(spawner: Spawner) -> ! {
                 println!("WiFi started!");
             }
 
-            println!("Connecting to {WIFI_SSID}...");
-            if let Err(e) = wifi_controller.connect_async().await {
+            let mut connected = false;
+            for attempt in 1..=WIFI_CONNECT_RETRY_ATTEMPTS {
                 println!(
-                    "Couldn't connect to {WIFI_SSID}, because {e}, retrying in {WIFI_RETRY_SECS}s"
+                    "Connecting to {WIFI_SSID} (attempt {attempt}/{WIFI_CONNECT_RETRY_ATTEMPTS})..."
                 );
-                Timer::after_secs(WIFI_RETRY_SECS).await;
+                match wifi_controller.connect_async().await {
+                    Ok(()) => {
+                        println!("Connected to {WIFI_SSID}");
+                        connected = true;
+                        break;
+                    }
+                    Err(e) if attempt < WIFI_CONNECT_RETRY_ATTEMPTS => {
+                        println!(
+                            "Couldn't connect to {WIFI_SSID}, because {e}, retrying in {WIFI_RETRY_SECONDS}s"
+                        );
+                        Timer::after_secs(WIFI_RETRY_SECONDS).await;
+                    }
+                    Err(e) => println!(
+                        "Couldn't connect to {WIFI_SSID} after {WIFI_CONNECT_RETRY_ATTEMPTS} attempts, because {e}, waiting for the next cycle"
+                    ),
+                }
+            }
+
+            if !connected {
+                Timer::after_secs(WAKE_INTERVAL_SECS).await;
                 continue;
             }
-            println!("Connected to {WIFI_SSID}")
         }
 
         let dns = DnsSocket::new(stack);
@@ -158,17 +178,41 @@ async fn main(spawner: Spawner) -> ! {
         body.clear();
         write!(body, "{{\"value\": {moisture_percent}}}").unwrap();
 
-        match client.request(Method::POST, WEBHOOK_URL).await {
-            Ok(http_req) => {
-                println!("About to send payload '{body}'");
-                let mut http_req = http_req
-                    .body(body.as_bytes())
-                    .headers(&[("Content-Type", "application/json")]);
-                let response = http_req.send(&mut buffer).await.unwrap();
+        for attempt in 1..=POST_RETRY_ATTEMPTS {
+            println!("Sending POST to {WEBHOOK_URL} (attempt {attempt}/{POST_RETRY_ATTEMPTS})");
+            match client.request(Method::POST, WEBHOOK_URL).await {
+                Ok(http_req) => {
+                    println!("About to send payload '{body}'");
+                    let mut http_req = http_req
+                        .body(body.as_bytes())
+                        .headers(&[("Content-Type", "application/json")]);
 
-                println!("Got response {:?}", response.status);
+                    match http_req.send(&mut buffer).await {
+                        Ok(response) => {
+                            println!("Got response {:?}", response.status);
+                            break;
+                        }
+                        Err(e) if attempt < POST_RETRY_ATTEMPTS => {
+                            println!(
+                                "Got error {e:?} when sending the http request, retrying in {WIFI_RETRY_SECONDS}s"
+                            );
+                            Timer::after_secs(WIFI_RETRY_SECONDS).await;
+                        }
+                        Err(e) => println!(
+                            "Got error {e:?} when sending the http request after {POST_RETRY_ATTEMPTS} attempts, waiting for the next cycle"
+                        ),
+                    }
+                }
+                Err(e) if attempt < POST_RETRY_ATTEMPTS => {
+                    println!(
+                        "Got error {e:?} when trying to construct the http request, retrying in {WIFI_RETRY_SECONDS}s"
+                    );
+                    Timer::after_secs(WIFI_RETRY_SECONDS).await;
+                }
+                Err(e) => println!(
+                    "Got error {e:?} when trying to construct the http request after {POST_RETRY_ATTEMPTS} attempts, waiting for the next cycle"
+                ),
             }
-            Err(e) => println!("Got error {e:?} when trying to construct the http request"),
         }
 
         Timer::after_secs(WAKE_INTERVAL_SECS).await;
